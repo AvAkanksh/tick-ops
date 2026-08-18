@@ -1,0 +1,104 @@
+{
+  "meta": {
+    "events_per_symbol_day": 40000,
+    "reps": 7,
+    "threads": 4,
+    "platform": "Darwin arm64",
+    "duckdb": "1.5.5"
+  },
+  "points": [
+    {
+      "n_days": 5,
+      "scoped_symbol": "META",
+      "scoped_day": 2,
+      "layouts": {
+        "single": {
+          "ms": 14.747374996659346,
+          "files": 3,
+          "bytes": 49961235,
+          "rows": 14112
+        },
+        "by_date": {
+          "ms": 14.65404099872103,
+          "files": 15,
+          "bytes": 49135865,
+          "rows": 14112
+        },
+        "by_date_symbol": {
+          "ms": 42.48324999934994,
+          "files": 120,
+          "bytes": 44323478,
+          "rows": 14112
+        },
+        "sorted": {
+          "ms": 10.434624993649777,
+          "files": 15,
+          "bytes": 43996716,
+          "rows": 14112
+        }
+      }
+    },
+    {
+      "n_days": 15,
+      "scoped_symbol": "META",
+      "scoped_day": 7,
+      "layouts": {
+        "single": {
+          "ms": 15.475874999538064,
+          "files": 3,
+          "bytes": 149609178,
+          "rows": 14206
+        },
+        "by_date": {
+          "ms": 25.41150000615744,
+          "files": 45,
+          "bytes": 148133314,
+          "rows": 14206
+        },
+        "by_date_symbol": {
+          "ms": 149.45525000075577,
+          "files": 360,
+          "bytes": 133382730,
+          "rows": 14206
+        },
+        "sorted": {
+          "ms": 27.89400000619935,
+          "files": 45,
+          "bytes": 132561048,
+          "rows": 14206
+        }
+      }
+    },
+    {
+      "n_days": 30,
+      "scoped_symbol": "META",
+      "scoped_day": 15,
+      "layouts": {
+        "single": {
+          "ms": 14.05700000032084,
+          "files": 3,
+          "bytes": 299838192,
+          "rows": 13970
+        },
+        "by_date": {
+          "ms": 28.9255830066395,
+          "files": 90,
+          "bytes": 297860357,
+          "rows": 13970
+        },
+        "by_date_symbol": {
+          "ms": 207.30208299937658,
+          "files": 720,
+          "bytes": 268532933,
+          "rows": 13970
+        },
+        "sorted": {
+          "ms": 27.191999994101934,
+          "files": 90,
+          "bytes": 266738511,
+          "rows": 13970
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,98 @@
+{
+  "meta": {
+    "layout": "sorted",
+    "events_per_symbol_day": 40000,
+    "repeats": 5,
+    "threads": 4,
+    "with_pandas": false,
+    "platform": "Darwin arm64",
+    "duckdb": "1.5.5"
+  },
+  "points": [
+    {
+      "n_days": 1,
+      "rows": {
+        "trades": 112503,
+        "quotes": 209419,
+        "book_events": 389173
+      },
+      "total_bytes": 8851519,
+      "duckdb_ms": {
+        "q1_asof": 30.114040993794333,
+        "q2_vwap": 7.674458000110462,
+        "q3_book": 190.22987500648014,
+        "q4_event": 23.893165998742916,
+        "q5_corr": 9.254083000996616
+      },
+      "pandas_ms": {}
+    },
+    {
+      "n_days": 2,
+      "rows": {
+        "trades": 226613,
+        "quotes": 420037,
+        "book_events": 780166
+      },
+      "total_bytes": 17655518,
+      "duckdb_ms": {
+        "q1_asof": 49.6361249970505,
+        "q2_vwap": 9.335332993941847,
+        "q3_book": 354.87633400043705,
+        "q4_event": 44.4441250001546,
+        "q5_corr": 10.076624996145256
+      },
+      "pandas_ms": {}
+    },
+    {
+      "n_days": 5,
+      "rows": {
+        "trades": 564379,
+        "quotes": 1048318,
+        "book_events": 1949891
+      },
+      "total_bytes": 43996716,
+      "duckdb_ms": {
+        "q1_asof": 126.73854100285098,
+        "q2_vwap": 15.49666599748889,
+        "q3_book": 846.1916250016657,
+        "q4_event": 90.48045900271973,
+        "q5_corr": 15.30766599898925
+      },
+      "pandas_ms": {}
+    },
+    {
+      "n_days": 10,
+      "rows": {
+        "trades": 1131150,
+        "quotes": 2097241,
+        "book_events": 3903333
+      },
+      "total_bytes": 87838570,
+      "duckdb_ms": {
+        "q1_asof": 239.70662500505568,
+        "q2_vwap": 23.68620799825294,
+        "q3_book": 1612.312249999377,
+        "q4_event": 179.41404200246325,
+        "q5_corr": 29.01616700546583
+      },
+      "pandas_ms": {}
+    },
+    {
+      "n_days": 20,
+      "rows": {
+        "trades": 2257674,
+        "quotes": 4194431,
+        "book_events": 7802961
+      },
+      "total_bytes": 177243053,
+      "duckdb_ms": {
+        "q1_asof": 488.1361250008922,
+        "q2_vwap": 40.351125004235655,
+        "q3_book": 3794.9563329966622,
+        "q4_event": 451.5527920011664,
+        "q5_corr": 69.64800000423566
+      },
+      "pandas_ms": {}
+    }
+  ]
+}

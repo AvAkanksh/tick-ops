@@ -1,0 +1,8 @@
+duckdb>=1.1
+pyarrow>=17
+pandas>=2.2
+numpy>=2.0
+
+[dev]
+pytest>=8.0
+ruff>=0.6

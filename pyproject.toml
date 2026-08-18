@@ -1,0 +1,30 @@
+[project]
+name = "tickstack"
+version = "0.1.0"
+description = "A modern tick research stack (Arrow/Parquet/DuckDB) benchmarked against a fair pandas baseline on five canonical quant queries"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.1",
+    "pyarrow>=17",
+    "pandas>=2.2",
+    "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# The queries modules intentionally embed multi-line SQL; long string lines are fine.
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
