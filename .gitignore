@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments and tool caches
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Generated data — every byte is reproducible from the committed seed
+data/

@@ -153,7 +153,7 @@ def verify_q3_against_ground_truth(con) -> tuple[int, int]:
         LEFT JOIN _recon_gt r
           ON r.symbol=q.symbol AND r.sample_ts=q.ts
         """
-    ).fetchone()
+    ).fetchall()[0]
     con.unregister("_recon_gt")
     total, matches = int(row[0]), int(row[1] or 0)
     return matches, total

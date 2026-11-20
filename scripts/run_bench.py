@@ -5,6 +5,7 @@ Usage:
     python scripts/run_bench.py --preset quick        # fast, for CI / smoke
     python scripts/run_bench.py --preset full         # the committed results
     python scripts/run_bench.py --days 10 --events 60000 --repeats 9
+    python scripts/run_bench.py --preset quick --no-servers   # no Docker needed
 
 Everything is seeded, so the same arguments reproduce the same dataset and — noise
 aside — the same timings. The script writes:
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import sys
 from pathlib import Path
@@ -55,6 +57,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--data-dir", type=Path, default=_ROOT / "data" / "parquet")
     p.add_argument("--results-dir", type=Path, default=_ROOT / "results")
     p.add_argument("--no-pandas", action="store_true", help="skip the pandas baseline")
+    p.add_argument("--no-polars", action="store_true", help="skip the Polars baseline")
+    p.add_argument("--servers", type=str, default="clickhouse,questdb",
+                   help="server engines to benchmark (must be running: docker compose up -d); "
+                        "'' to skip")
+    p.add_argument("--no-servers", action="store_true", help="same as --servers ''")
     p.add_argument("--layouts", type=str, default=",".join(LAYOUTS))
     p.add_argument("--keep-data", action="store_true", help="do not delete data dir after run")
     return p.parse_args(argv)
@@ -75,8 +82,19 @@ def build_config(args: argparse.Namespace) -> SimConfig:
     return SimConfig(**{**base.__dict__, **kw}) if kw else base
 
 
+def _polars_version() -> str:
+    import polars
+
+    return polars.__version__
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
+    # Polars sizes its global thread pool at import; cap it like every other engine.
+    os.environ["POLARS_MAX_THREADS"] = str(args.threads)
+    server_engines = () if args.no_servers else tuple(
+        s.strip() for s in args.servers.split(",") if s.strip()
+    )
     cfg = build_config(args)
     layouts = tuple(s.strip() for s in args.layouts.split(",") if s.strip())
 
@@ -96,10 +114,12 @@ def main(argv=None) -> int:
         print("ERROR: book reconstruction does not match generator quotes", file=sys.stderr)
         return 2
 
-    print(f"[4/4] benchmarking (repeats={args.repeats}, threads={args.threads})", flush=True)
+    print(f"[4/4] benchmarking (repeats={args.repeats}, threads={args.threads}, "
+          f"servers={','.join(server_engines) or 'none'})", flush=True)
     res = run_benchmark(
         args.data_dir, layouts=layouts, repeats=args.repeats,
         threads=args.threads, run_pandas=not args.no_pandas,
+        run_polars=not args.no_polars, server_engines=server_engines,
     )
     res.meta.update(
         {
@@ -111,8 +131,8 @@ def main(argv=None) -> int:
             "versions": {
                 "python": platform.python_version(),
                 "duckdb": duckdb.__version__,
-                "clickhouse": "26.3 (eval)",
-                "questdb": "8.2 (eval)",
+                **res.meta.get("server_versions", {}),
+                **({"polars": _polars_version()} if not args.no_polars else {}),
                 "pyarrow": pyarrow.__version__,
                 "pandas": pandas.__version__,
                 "numpy": numpy.__version__,

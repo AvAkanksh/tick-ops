@@ -83,7 +83,7 @@ def test_q4_event_study_agrees_across_params(env, horizon_ns, top_frac):
 def test_q1_asof_left_join_keeps_all_trades(env):
     """A LEFT ASOF join must return exactly one row per trade."""
     d = qd.q1_asof_trades_quotes(env["con"])
-    n_trades = env["con"].execute("SELECT count(*) FROM trades").fetchone()[0]
+    n_trades = env["con"].execute("SELECT count(*) FROM trades").fetchall()[0][0]
     assert d.num_rows == n_trades
 
 
@@ -94,8 +94,8 @@ def test_layouts_hold_identical_data(env, layout):
     con = engine.connect(threads=2)
     engine.register_layout(con, LayoutPaths(root=env["base"] / layout, kind=layout))
     for table in ("trades", "quotes", "book_events"):
-        n = con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-        n0 = env["con"].execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        n = con.execute(f"SELECT count(*) FROM {table}").fetchall()[0][0]
+        n0 = env["con"].execute(f"SELECT count(*) FROM {table}").fetchall()[0][0]
         assert n == n0, f"{layout}.{table}: {n} != {n0}"
     con.close()
 
@@ -113,3 +113,32 @@ def test_q1_agrees_across_layouts(env, layout):
     )
     con.close()
     assert ok, f"{layout}: {msg}"
+
+
+
+@pytest.fixture(scope="module")
+def three_day_base(tmp_path_factory):
+    # The misestimate needs a few partitions to prune; 3 small days reproduce it.
+    base = tmp_path_factory.mktemp("three_day")
+    cfg = SimConfig(n_days=3, symbols=("AAA", "BBB", "CCC"), events_per_symbol_day=4_000)
+    build_all_layouts(base, Simulator(cfg).simulate(), layouts=("by_date", "by_date_symbol", "sorted"))
+    return base
+
+
+@pytest.mark.parametrize("layout", ["by_date", "by_date_symbol", "sorted"])
+def test_scoped_asof_keeps_asof_operator_on_partitioned_layouts(three_day_base, layout):
+    """Regression guard: partition-pruned scans are estimated at ~1 row, which makes
+    DuckDB swap the ASOF join for a nested-loop join (~40x slower at benchmark scale).
+    ``engine.connect`` disables that rewrite; the plan must keep the ASOF operator.
+    Verified to fail with ``asof_loop_join_threshold`` at its default of 64."""
+    con = engine.connect(threads=2)
+    engine.register_layout(con, LayoutPaths(root=three_day_base / layout, kind=layout))
+    sql = """
+        WITH t AS (SELECT ts, symbol, price FROM trades WHERE symbol = ? AND date = ?),
+             q AS (SELECT ts, symbol, bid_px FROM quotes WHERE symbol = ? AND date = ?)
+        SELECT t.ts, q.bid_px FROM t ASOF LEFT JOIN q ON t.symbol = q.symbol AND t.ts >= q.ts
+    """
+    plan = con.sql("EXPLAIN " + sql, params=["AAA", 1, "AAA", 1]).fetchall()[0][1]
+    con.close()
+    assert "nested loop" not in plan.lower(), plan
+    assert "ASOF" in plan.upper(), plan

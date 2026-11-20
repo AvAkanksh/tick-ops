@@ -64,7 +64,7 @@ def _scoped_median_ms(base: Path, layout: str, sym: str, day: int, reps: int, th
         con = engine.connect(threads=threads)
         engine.register_layout(con, paths)
         t0 = time.perf_counter()
-        out = con.execute(_SCOPED_SQL, [sym, day, sym, day]).to_arrow_table()
+        out = con.sql(_SCOPED_SQL, params=[sym, day, sym, day]).to_arrow_table()
         dt = (time.perf_counter() - t0) * 1000
         result_rows = out.num_rows
         con.close()
@@ -142,9 +142,8 @@ def _render_md(out: dict) -> str:
     L.append(
         "**Reading it:** `by_date_symbol` creates one file per symbol-day, so its file "
         "count grows with the data and each file stays small — its scoped-query latency "
-        "*rises* with scale (the small-files anti-pattern). `single` stays low and shows "
-        "no growth trend across this range (within a run-to-run noise band of roughly "
-        "±40% — the middle point above is noisier than the endpoints). Note that "
+        "*rises* with scale (the small-files anti-pattern). `single` stays low and "
+        "nearly flat across this range. Note that "
         "`single` is *not* paying a full-table scan here: because the generator writes "
         "day-by-day, `date` is monotonic in row order, so Parquet row-group min/max "
         "statistics let DuckDB skip most row groups for a single-day predicate even in "

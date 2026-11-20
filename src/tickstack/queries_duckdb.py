@@ -46,7 +46,7 @@ def q1_asof_trades_quotes(con: duckdb.DuckDBPyConnection) -> pa.Table:
     keeps trades that precede their symbol's first quote, with NULL quote fields.
     Deterministic tie-break: ties on ts are broken by ``quote.ts`` being 'known'
     at the trade, which mirrors a feed logging the quote update before the print."""
-    return con.execute(
+    return con.sql(
         """
         SELECT
             t.seq, t.ts, t.symbol, t.price AS trade_px, t.size AS trade_sz, t.aggressor,
@@ -73,7 +73,7 @@ def q2_vwap_bars(con: duckdb.DuckDBPyConnection, bar_ns: int = NS_PER_MIN) -> pa
     ``arg_max`` on ``seq`` (not ``ts``) so they are the first and last *trade* in the
     bar even when several prints share a nanosecond — ``ts`` alone would leave a
     sweep's close ambiguous."""
-    return con.execute(
+    return con.sql(
         """
         WITH binned AS (
             SELECT symbol, seq, ts, price, size, (ts // ?) AS bar
@@ -95,7 +95,7 @@ def q2_vwap_bars(con: duckdb.DuckDBPyConnection, bar_ns: int = NS_PER_MIN) -> pa
         GROUP BY symbol, bar
         ORDER BY symbol, bar
         """,
-        [bar_ns, bar_ns],
+        params=[bar_ns, bar_ns],
     ).to_arrow_table()
 
 
@@ -121,7 +121,7 @@ def q3_book_reconstruction(con: duckdb.DuckDBPyConnection) -> pa.Table:
 
     The result matches the generator's own top-of-book — the correctness harness
     reconstructs at quote timestamps and diffs against ``quotes``."""
-    return con.execute(
+    return con.sql(
         f"""
         WITH running AS (
             SELECT
@@ -176,7 +176,7 @@ def q4_event_study(
     exit mid is the prevailing quote mid ``horizon_ns`` later (a second as-of join
     on ``ts + horizon``). Return is basis points of the entry mid. Events whose exit
     falls after the last quote, or with a non-positive entry mid, are dropped."""
-    return con.execute(
+    return con.sql(
         """
         WITH mids AS (
             SELECT ts, symbol, (bid_px + ask_px) / 2.0 AS mid FROM quotes
@@ -211,7 +211,7 @@ def q4_event_study(
         GROUP BY symbol
         ORDER BY symbol
         """,
-        [top_frac, horizon_ns],
+        params=[top_frac, horizon_ns],
     ).to_arrow_table()
 
 
@@ -226,7 +226,7 @@ def q5_cross_symbol_corr(
     the correlation runs over the aligned return series — bars where either symbol
     lacks a return are dropped for that pair (inner join on bar). ``a.symbol <
     b.symbol`` yields each unordered pair once."""
-    return con.execute(
+    return con.sql(
         """
         WITH binned AS (
             SELECT symbol, ts, (bid_px + ask_px) / 2.0 AS mid_px, (ts // ?) AS bar
@@ -254,5 +254,5 @@ def q5_cross_symbol_corr(
         GROUP BY a.symbol, b.symbol
         ORDER BY a.symbol, b.symbol
         """,
-        [bar_ns],
+        params=[bar_ns],
     ).to_arrow_table()

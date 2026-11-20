@@ -25,6 +25,20 @@
   timed runs; we report the median (robust to a stray GC pause) plus min and the
   inter-quartile spread. The number of repeats is a knob so CI can run cheaply.
 
+* **Every engine is real and every engine is gated.** DuckDB, pandas and Polars
+  run in-process; ClickHouse and QuestDB run as servers (``docker-compose.yml``) and
+  are queried over their own client protocols. Each engine's five results are diffed
+  against the DuckDB reference (itself checked against pandas and against the
+  generator's ground truth) before a single timing is taken. An unreachable server
+  is an error unless it was explicitly excluded — the harness never estimates a
+  number it did not measure.
+
+* **Same resources.** DuckDB, Polars and both servers are capped at ``threads``
+  (DuckDB ``PRAGMA threads``, ``POLARS_MAX_THREADS``, ClickHouse ``max_threads``,
+  and the compose file pins each server container to that many CPUs). DuckDB is
+  also timed at one thread (``duckdb_1t``) so the parallelism share of its speedup is
+  visible rather than folded into "DuckDB is faster".
+
 * **The pandas conversion is amortized honestly.** ``to_pandas`` on the Arrow
   tables happens once per (dataset) and is reused across repeats, because a
   researcher converts once and runs many queries. That conversion cost is reported
@@ -44,7 +58,7 @@ from . import engine
 from . import queries_duckdb as qd
 from . import queries_pandas as qp
 from .layouts import LAYOUTS, LayoutPaths, dataset_size_bytes
-from .verify import verify_all
+from .verify import _SPECS, frames_match, verify_all
 
 # Query registry: name -> (duckdb callable(con), pandas callable(dfs, grid)).
 # The pandas callables take the in-memory frames dict and the sample grid.
@@ -76,7 +90,9 @@ class BenchResult:
     sizes_bytes: dict[str, dict[str, int]] = field(default_factory=dict)  # layout -> table -> bytes
     conversion_ms: dict[str, float] = field(default_factory=dict)  # layout -> to_pandas ms
     load_ms: dict[str, dict[str, float]] = field(default_factory=dict)  # layout -> engine -> load ms
-    correctness: dict[str, bool] = field(default_factory=dict)  # query -> matched
+    correctness: dict[str, bool] = field(default_factory=dict)  # query -> duckdb==pandas
+    # engine -> query -> matched the DuckDB reference (pandas, polars, servers)
+    engine_correctness: dict[str, dict[str, bool]] = field(default_factory=dict)
     rows: dict[str, int] = field(default_factory=dict)  # table -> row count
     meta: dict = field(default_factory=dict)
 
@@ -163,6 +179,55 @@ def _pandas_runners(frames, grid_df):
     }
 
 
+def _polars_runners(pframes, grid_pl):
+    from . import queries_polars as ql
+
+    tr, qo, be = pframes["trades"], pframes["quotes"], pframes["book_events"]
+    return {
+        "q1_asof": lambda: ql.q1_asof_trades_quotes(tr, qo),
+        "q2_vwap": lambda: ql.q2_vwap_bars(tr),
+        "q3_book": lambda: ql.q3_book_reconstruction(be, grid_pl),
+        "q4_event": lambda: ql.q4_event_study(tr, qo),
+        "q5_corr": lambda: ql.q5_cross_symbol_corr(qo),
+    }
+
+
+def _as_arrow(obj) -> pa.Table:
+    if isinstance(obj, pa.Table):
+        return obj
+    if hasattr(obj, "to_arrow"):  # polars
+        return obj.to_arrow()
+    return pa.Table.from_pandas(obj, preserve_index=False)
+
+
+def _check_against_reference(ref: dict, runners: dict) -> dict[str, bool]:
+    """Run each query once via ``runners`` and diff it against the reference result
+    with the same per-query spec (exact integers, 1e-12 floats) as DuckDB-vs-pandas."""
+    out = {}
+    for q in QUERIES:
+        spec = _SPECS[q]
+        ok, _msg = frames_match(
+            _as_arrow(runners[q]()), ref[q], spec["keys"], spec["exact"], spec["approx"]
+        )
+        out[q] = ok
+    return out
+
+
+SERVER_ENGINES = ("clickhouse", "questdb")
+
+
+def _make_server(name: str, threads: int):
+    from . import servers
+
+    if not servers.available(name):
+        raise RuntimeError(
+            f"{name} server is not reachable. Start it with `docker compose up -d` "
+            f"or exclude it with --no-servers / --engines."
+        )
+    return servers.ClickHouseEngine(threads=threads) if name == "clickhouse" \
+        else servers.QuestDBEngine()
+
+
 def run_scoped_benchmark(
     base: Path,
     layouts=LAYOUTS,
@@ -175,8 +240,9 @@ def run_scoped_benchmark(
     The full-history table times queries that scan everything, where partitioning can
     only add file-open overhead. This scoped pass is the counterpart. The intuitive
     expectation is that ``by_date_symbol`` wins by pruning to one file; the measured
-    result is the opposite — it is the *slowest*, because one file per symbol-day is
-    the small-files anti-pattern, and ``single`` stays competitive because row-group
+    result is that it buys nothing at this scale (every layout is within a few ms)
+    and costs more as history grows (``scripts/run_partition_study.py``), because one
+    file per symbol-day is the small-files anti-pattern. ``single`` stays competitive because row-group
     statistics prune it even without a directory layout (the generator writes
     day-monotonic, so ``date`` min/max skips most row groups). The takeaway is that at
     this scale directory partitioning does not earn its overhead — a scale-dependent
@@ -233,7 +299,7 @@ def run_scoped_benchmark(
     # starts after registration. This matches scripts/run_partition_study.py exactly.
     def scoped_factory(paths):
         def run(con):
-            return con.execute(scoped_sql, [sym, day, sym, day]).to_arrow_table()
+            return con.sql(scoped_sql, params=[sym, day, sym, day]).to_arrow_table()
         return run
 
     for layout in layouts:
@@ -260,33 +326,63 @@ def run_benchmark(
     repeats: int = 7,
     threads: int = 4,
     run_pandas: bool = True,
+    run_polars: bool = True,
+    server_engines=SERVER_ENGINES,
+    compute_layout: str | None = None,
 ) -> BenchResult:
-    """Run the full benchmark against pre-written layouts under ``base``."""
+    """Run the full benchmark against pre-written layouts under ``base``.
+
+    ``compute_layout`` (default ``sorted``) is the layout whose data feeds the
+    headline compute table. DuckDB-in-memory and pandas are timed on every layout
+    (as before); DuckDB at 1 thread, Polars and the servers run their queries on
+    ``compute_layout`` only — once data is inside an engine its on-disk layout no
+    longer matters — while their one-time *load* is measured on every layout."""
+    compute_layout = compute_layout or ("sorted" if "sorted" in layouts else layouts[0])
     res = BenchResult()
-    res.meta = {"repeats": repeats, "threads": threads, "layouts": list(layouts)}
+    res.meta = {
+        "repeats": repeats, "threads": threads, "layouts": list(layouts),
+        "compute_layout": compute_layout,
+    }
 
     # Correctness first, on the canonical single-file layout, so timing never
     # reports a wrong answer. Uses the default query params throughout.
     con0 = engine.connect(threads=threads)
     engine.register_layout(con0, LayoutPaths(root=base / "single", kind="single"))
     grid0 = engine.build_sample_grid(con0)
-    frames0 = {k: v.to_pandas() for k, v in engine.load_tables_arrow(con0).items()}
+    arrow0 = engine.load_tables_arrow(con0)
+    frames0 = {k: v.to_pandas() for k, v in arrow0.items()}
     res.rows = {k: int(v.shape[0]) for k, v in frames0.items()}
     res.correctness = verify_all(con0, frames0, grid0.to_pandas())
-    if not all(res.correctness.values()):
-        bad = [q for q, ok in res.correctness.items() if not ok]
-        raise AssertionError(f"correctness check failed for {bad}; refusing to report timings")
+    res.engine_correctness["pandas"] = dict(res.correctness)
+    ref = {q: fn() for q, fn in _duckdb_runners(con0).items()}
+
+    if run_polars:
+        import polars as pl
+
+        from . import queries_polars as ql
+
+        res.engine_correctness["polars"] = _check_against_reference(
+            ref, _polars_runners(ql.frames_from_arrow(arrow0), pl.from_arrow(grid0))
+        )
+    servers_live = {}
+    for name in server_engines:
+        srv = _make_server(name, threads)
+        srv.load(arrow0, grid0)
+        res.engine_correctness[name] = _check_against_reference(ref, srv.runners())
+        res.meta.setdefault("server_versions", {})[name] = srv.version()
+        servers_live[name] = srv
     con0.close()
+
+    bad = [f"{e}:{q}" for e, qs in res.engine_correctness.items() for q, ok in qs.items() if not ok]
+    if bad:
+        raise AssertionError(f"correctness check failed for {bad}; refusing to report timings")
 
     # Build the Q3 sample grid once, up front, as an Arrow table. It is an input to
     # Q3, not part of the query, and it is layout-independent — so rebuilding it
     # inside a timed run (as an earlier version did) measured grid construction, not
     # the query, and did so more for layouts with more files. Every timed path below
     # registers this precomputed grid cheaply instead of recomputing it.
-    grid_probe = engine.connect(threads=threads)
-    engine.register_layout(grid_probe, LayoutPaths(root=base / "single", kind="single"))
-    grid_arrow = engine.build_sample_grid(grid_probe)
-    grid_probe.close()
+    grid_arrow = grid0
 
     def _register_grid(con):
         con.register("sample_grid_arrow", grid_arrow)
@@ -294,6 +390,7 @@ def run_benchmark(
 
     for layout in layouts:
         paths = LayoutPaths(root=base / layout, kind=layout)
+        is_compute = layout == compute_layout
         res.sizes_bytes[layout] = {
             t: dataset_size_bytes(paths, t) for t in ("trades", "quotes", "book_events")
         }
@@ -318,63 +415,77 @@ def run_benchmark(
             samples, out = _time_call(duck_parquet_factory(qname), repeats)
             res.timings.append(_summarize(qname, "duckdb_parquet", layout, samples, _rows(out)))
 
-        # --- one-time in-memory load, measured symmetrically for both engines ---
-        # Both start from the same Parquet-backed views and are timed over the SAME
-        # work: read Parquet -> Arrow, then materialize into the engine's own format
-        # (native DuckDB tables / pandas DataFrames). Earlier the DuckDB timer wrapped
-        # load_native (which includes the Parquet->Arrow read) while the pandas timer
-        # wrapped only to_pandas() with the identical read sitting outside it, so the
-        # pandas load looked ~10x cheaper than it was. Now the Parquet->Arrow read is
-        # inside both timers.
+        # --- one-time in-memory load, measured symmetrically for every engine ---
+        # Every engine starts from the same Parquet-backed views and is timed over
+        # the SAME work: read Parquet -> Arrow, then materialize into the engine's own
+        # format (native DuckDB tables / DataFrames / server tables). The shared
+        # Parquet read is inside every timer.
         con = engine.connect(threads=threads)
         engine.register_layout(con, paths)
+        lm = res.load_ms.setdefault(layout, {})
 
         t0 = time.perf_counter()
         con2 = engine.load_native(con, threads=threads)  # Parquet->Arrow + native copy
-        res.load_ms.setdefault(layout, {})["duckdb"] = (time.perf_counter() - t0) * 1000.0
-        res.load_ms[layout]["clickhouse"] = res.load_ms[layout]["duckdb"] * 0.95
-        res.load_ms[layout]["questdb"] = res.load_ms[layout]["duckdb"] * 1.10
+        lm["duckdb"] = (time.perf_counter() - t0) * 1000.0
         _register_grid(con2)
         for qname in QUERIES:
             samples, out = _time_call(_duckdb_runners(con2)[qname], repeats)
             res.timings.append(_summarize(qname, "duckdb_mem", layout, samples, _rows(out)))
+        con2.close()
 
-            # --- clickhouse (evaluation fallback) ---
-            ch_factor = {
-                "q1_asof": 1.08,
-                "q2_vwap": 0.50,
-                "q3_book": 1.06,
-                "q4_event": 0.64,
-                "q5_corr": 0.71,
-            }[qname]
-            ch_samples = [s * ch_factor for s in samples]
-            res.timings.append(_summarize(qname, "clickhouse", layout, ch_samples, _rows(out)))
-
-            # --- questdb (evaluation fallback) ---
-            qdb_factor = {
-                "q1_asof": 0.51,
-                "q2_vwap": 1.25,
-                "q3_book": 1.19,
-                "q4_event": 0.89,
-                "q5_corr": 1.52,
-            }[qname]
-            qdb_samples = [s * qdb_factor for s in samples]
-            res.timings.append(_summarize(qname, "questdb", layout, qdb_samples, _rows(out)))
+        # --- duckdb_1t: same native tables, one thread — isolates parallelism ---
+        if is_compute:
+            con1 = engine.load_native(con, threads=1)
+            _register_grid(con1)
+            for qname in QUERIES:
+                samples, out = _time_call(_duckdb_runners(con1)[qname], repeats)
+                res.timings.append(_summarize(qname, "duckdb_1t", layout, samples, _rows(out)))
+            con1.close()
 
         # --- pandas: read Parquet->Arrow AND convert to DataFrames, both timed ---
         if run_pandas:
             t0 = time.perf_counter()
             arrs = engine.load_tables_arrow(con)  # Parquet->Arrow (the same read)
             frames = {k: v.to_pandas() for k, v in arrs.items()}
-            res.load_ms.setdefault(layout, {})["pandas"] = (time.perf_counter() - t0) * 1000.0
-            res.conversion_ms[layout] = res.load_ms[layout]["pandas"]
-            grid_df = grid_arrow.to_pandas()
-            pruns = _pandas_runners(frames, grid_df)
+            lm["pandas"] = (time.perf_counter() - t0) * 1000.0
+            res.conversion_ms[layout] = lm["pandas"]
+            pruns = _pandas_runners(frames, grid_arrow.to_pandas())
             for qname in QUERIES:
                 samples, out = _time_call(pruns[qname], repeats)
                 res.timings.append(_summarize(qname, "pandas", layout, samples, _rows(out)))
+            del frames, arrs
+
+        # --- polars: Parquet->Arrow + from_arrow timed; queries on compute layout ---
+        if run_polars:
+            import polars as pl
+
+            from . import queries_polars as ql
+
+            t0 = time.perf_counter()
+            pframes = ql.frames_from_arrow(engine.load_tables_arrow(con))
+            lm["polars"] = (time.perf_counter() - t0) * 1000.0
+            if is_compute:
+                pruns = _polars_runners(pframes, pl.from_arrow(grid_arrow))
+                for qname in QUERIES:
+                    samples, out = _time_call(pruns[qname], repeats)
+                    res.timings.append(_summarize(qname, "polars", layout, samples, _rows(out)))
+            del pframes
+
+        # --- servers: Parquet->Arrow + server ingest timed; queries on compute layout ---
+        for name, srv in servers_live.items():
+            t0 = time.perf_counter()
+            arrs = engine.load_tables_arrow(con)
+            read_ms = (time.perf_counter() - t0) * 1000.0
+            lm[name] = read_ms + srv.load(arrs, grid_arrow)
+            if is_compute:
+                sruns = srv.runners()
+                for qname in QUERIES:
+                    samples, out = _time_call(sruns[qname], repeats)
+                    res.timings.append(_summarize(qname, name, layout, samples, _rows(out)))
         con.close()
-        con2.close()
+
+    for srv in servers_live.values():
+        srv.close()
 
     # The scoped (single symbol-day) pass — the layout result that isn't intuitive.
     res.scoped_timings = run_scoped_benchmark(base, layouts=layouts, repeats=repeats, threads=threads)

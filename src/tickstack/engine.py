@@ -10,6 +10,8 @@ pandas baseline or Q3's cross-check is meaningless — so both sides call
 
 from __future__ import annotations
 
+import contextlib
+
 import duckdb
 import pyarrow as pa
 
@@ -21,6 +23,15 @@ def connect(threads: int | None = None, memory_limit: str | None = None) -> duck
     """A fresh in-memory DuckDB connection with optional resource caps. Benchmarks
     pass ``threads`` explicitly so single- vs multi-threaded runs are labeled."""
     con = duckdb.connect()
+    # DuckDB rewrites an ASOF join whose left side is *estimated* at <= 64 rows into a
+    # nested-loop join + arg_max. Hive-partition-pruned Parquet scans are estimated at
+    # "~1 row" whatever they hold, so on the partitioned layouts the scoped
+    # one-symbol-day as-of (14k trades x 26k quotes) took that path and ran ~40x
+    # slower (1.2 s vs 30 ms; same rows) — a planner misestimate, not a layout cost.
+    # Threshold 0 keeps the real ASOF operator everywhere; the single-file layout,
+    # whose estimates are right, is unaffected.
+    with contextlib.suppress(duckdb.Error):  # setting absent on older DuckDB
+        con.execute("SET asof_loop_join_threshold = 0")
     if threads is not None:
         con.execute(f"PRAGMA threads={threads}")
     if memory_limit is not None:
@@ -58,7 +69,7 @@ def build_sample_grid(
     bounds = con.execute(
         "SELECT min(ts) AS lo, max(ts) AS hi FROM "
         "(SELECT ts FROM trades UNION ALL SELECT ts FROM quotes)"
-    ).fetchone()
+    ).fetchall()[0]
     lo, hi = int(bounds[0]), int(bounds[1])
     symbols = [r[0] for r in con.execute(
         "SELECT DISTINCT symbol FROM quotes ORDER BY symbol"
@@ -97,7 +108,7 @@ def load_native(
     session actually queries."""
     dst = connect(threads=threads)
     for table in ("trades", "quotes", "book_events"):
-        arrow_tbl = src.execute(f"SELECT * FROM {table}").to_arrow_table()
+        arrow_tbl = src.sql(f"SELECT * FROM {table}").to_arrow_table()
         dst.register(f"_src_{table}", arrow_tbl)
         dst.execute(f"CREATE TABLE {table} AS SELECT * FROM _src_{table}")
         dst.unregister(f"_src_{table}")
@@ -110,7 +121,7 @@ def load_tables_arrow(con: duckdb.DuckDBPyConnection) -> dict[str, pa.Table]:
     code' the project promises: DuckDB reads Parquet, hands Arrow to pandas with no
     intermediate serialization."""
     return {
-        "trades": con.execute("SELECT * FROM trades").to_arrow_table(),
-        "quotes": con.execute("SELECT * FROM quotes").to_arrow_table(),
-        "book_events": con.execute("SELECT * FROM book_events").to_arrow_table(),
+        "trades": con.sql("SELECT * FROM trades").to_arrow_table(),
+        "quotes": con.sql("SELECT * FROM quotes").to_arrow_table(),
+        "book_events": con.sql("SELECT * FROM book_events").to_arrow_table(),
     }

@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:25.8
+        env:
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
+        ports: ["18123:8123"]
+        options: >-
+          --health-cmd "wget -qO- http://localhost:8123/ping || exit 1"
+          --health-interval 5s --health-timeout 3s --health-retries 30
+      questdb:
+        image: questdb/questdb:9.1.0
+        ports: ["19000:9000"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Wait for QuestDB
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf "http://localhost:19000/exec?query=select%201" && exit 0; sleep 2
+          done; exit 1
+      - name: Correctness suite (all engines, servers included)
+        run: pytest -q -rs
+      - name: End-to-end benchmark (quick preset, every engine gated)
+        run: python scripts/run_bench.py --preset quick --repeats 3 --results-dir /tmp/ci-results

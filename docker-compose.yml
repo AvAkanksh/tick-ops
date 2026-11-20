@@ -1,0 +1,32 @@
+# The two server engines the benchmark measures. Each is capped at 4 CPUs to match
+# the in-process engines (DuckDB PRAGMA threads=4, POLARS_MAX_THREADS=4), and bound
+# to localhost on non-default ports so it cannot collide with a local install.
+#
+#   docker compose up -d        # start
+#   python scripts/run_bench.py --preset full
+#   docker compose down -v      # stop and discard data
+#
+# Override the host/ports with TICKSTACK_CH_HOST / TICKSTACK_CH_PORT /
+# TICKSTACK_QDB_HOST / TICKSTACK_QDB_HTTP_PORT if needed.
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    container_name: tickops-ch
+    cpus: 4
+    ports:
+      - "127.0.0.1:18123:8123"
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+
+  questdb:
+    image: questdb/questdb:9.1.0
+    container_name: tickops-qdb
+    cpus: 4
+    ports:
+      - "127.0.0.1:19000:9000"   # HTTP: REST queries + ILP ingest
+      - "127.0.0.1:18812:8812"   # PostgreSQL wire (not used by the harness)
+    environment:
+      QDB_SHARED_WORKER_COUNT: "4"
+      QDB_PG_SELECT_CACHE_ENABLED: "false"

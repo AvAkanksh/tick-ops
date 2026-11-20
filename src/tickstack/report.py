@@ -22,6 +22,27 @@ _QUERY_LABELS = {
 }
 
 
+_ENGINE_LABELS = {
+    "duckdb_mem": "DuckDB",
+    "duckdb_1t": "DuckDB 1 thread",
+    "polars": "Polars",
+    "clickhouse": "ClickHouse",
+    "questdb": "QuestDB",
+    "pandas": "pandas",
+}
+_HEADLINE_ENGINES = ("duckdb_mem", "duckdb_1t", "polars", "clickhouse", "questdb", "pandas")
+_LOAD_LABELS = {
+    "duckdb": "DuckDB", "pandas": "pandas", "polars": "Polars",
+    "clickhouse": "ClickHouse", "questdb": "QuestDB",
+}
+
+
+def _ratio(num, den) -> str:
+    if not (num and den and den.median_ms > 0):
+        return "—"
+    return f"{num.median_ms / den.median_ms:.1f}×"
+
+
 def _cell(timings, query, engine, layout):
     for t in timings:
         if t.query == query and t.engine == engine and t.layout == layout:
@@ -71,6 +92,18 @@ def render_markdown(res: BenchResult) -> str:
         f"results on all five queries: **{'PASS' if allok else 'FAIL'}** "
         f"({sum(res.correctness.values())}/{len(res.correctness)}).\n"
     )
+    others = {e: qs for e, qs in res.engine_correctness.items() if e != "pandas"}
+    if others:
+        lines.append(
+            "- **Every other engine vs the DuckDB reference** (same spec: integers "
+            "exact, floats within 1e-12; checked before any timing):\n"
+        )
+        lines.append("| Engine | " + " | ".join(q.split("_")[0].upper() for q in QUERIES) + " |")
+        lines.append("|---|" + "|".join([":-:"] * len(QUERIES)) + "|")
+        for e, qs in others.items():
+            cells = " | ".join("PASS" if qs.get(q) else "FAIL" for q in QUERIES)
+            lines.append(f"| {_ENGINE_LABELS.get(e, e)} | {cells} |")
+        lines.append("")
     if gt:
         lines.append(
             f"- **Q3 ground truth:** reconstructing top-of-book from the market-by-price "
@@ -94,31 +127,57 @@ def render_markdown(res: BenchResult) -> str:
     )
     lines.append("")
 
-    # --- Headline five-query table (best layout, arrow-vs-pandas) ---
-    lines.append("## Five-query benchmark — DuckDB, ClickHouse, QuestDB vs pandas (compute)\n")
+    # --- Headline five-query table (compute layout, every engine) ---
+    best = m.get("compute_layout") or ("sorted" if "sorted" in layouts else layouts[0])
+    engines = [e for e in _HEADLINE_ENGINES if any(
+        t.engine == e and t.layout == best for t in res.timings)]
+    lines.append("## Five-query benchmark — every engine, measured (compute)\n")
     lines.append(
-        "Median of "
-        f"{m.get('repeats','?')} timed runs after warmup, {m.get('threads','?')} threads, "
-        "on the `sorted` layout, all engines querying data loaded once into their own "
-        "in-memory format (native DuckDB/ClickHouse/QuestDB tables; pandas DataFrames) so this is compute "
-        "only. Speedup = pandas ÷ DuckDB.\n"
+        f"Median of {m.get('repeats','?')} timed runs after one warmup, "
+        f"{m.get('threads','?')} threads/cores per engine unless noted, data loaded once "
+        f"from the `{best}` layout into each engine's own format (native DuckDB tables, "
+        "pandas/Polars DataFrames, ClickHouse MergeTree, QuestDB WAL tables). "
+        "Speedups are pandas ÷ DuckDB(4 threads) and Polars ÷ DuckDB(4 threads).\n"
     )
-    best = "sorted" if "sorted" in layouts else layouts[0]
-    lines.append("| Query | DuckDB | ClickHouse | QuestDB | pandas | Speedup (DuckDB) |")
-    lines.append("|---|--:|--:|--:|--:|--:|")
+    lines.append(
+        "| Query | " + " | ".join(_ENGINE_LABELS[e] for e in engines)
+        + " | vs pandas | vs Polars |"
+    )
+    lines.append("|---|" + "|".join(["--:"] * (len(engines) + 2)) + "|")
     for q in QUERIES:
         d = _cell(res.timings, q, "duckdb_mem", best)
-        ch = _cell(res.timings, q, "clickhouse", best)
-        qdb = _cell(res.timings, q, "questdb", best)
         p = _cell(res.timings, q, "pandas", best)
-        speed = (p.median_ms / d.median_ms) if (d and p and d.median_ms > 0) else None
-        speed_s = f"{speed:.1f}×" if speed else "—"
+        pl_ = _cell(res.timings, q, "polars", best)
+        cells = [_fmt_ms(c.median_ms) if (c := _cell(res.timings, q, e, best)) else "—"
+                 for e in engines]
         lines.append(
-            f"| {_QUERY_LABELS[q]} | {_fmt_ms(d.median_ms if d else None)} "
-            f"| {_fmt_ms(ch.median_ms if ch else None)} | {_fmt_ms(qdb.median_ms if qdb else None)} "
-            f"| {_fmt_ms(p.median_ms if p else None)} | {speed_s} |"
+            f"| {_QUERY_LABELS[q]} | " + " | ".join(cells)
+            + f" | {_ratio(p, d)} | {_ratio(pl_, d)} |"
         )
     lines.append("")
+    lines.append(
+        "**Spread.** Inter-quartile range (p25–p75) of the same runs, so a reader can "
+        "tell a real gap from noise:\n"
+    )
+    lines.append("| Query | " + " | ".join(_ENGINE_LABELS[e] for e in engines) + " |")
+    lines.append("|---|" + "|".join(["--:"] * len(engines)) + "|")
+    for q in QUERIES:
+        cells = []
+        for e in engines:
+            c = _cell(res.timings, q, e, best)
+            cells.append(f"{_fmt_ms(c.p25_ms)}–{_fmt_ms(c.p75_ms)}" if c else "—")
+        lines.append(f"| {_QUERY_LABELS[q]} | " + " | ".join(cells) + " |")
+    lines.append("")
+    lines.append(
+        "**How to read the server columns.** ClickHouse and QuestDB are real servers "
+        "(Docker, each pinned to the same number of cores) queried over HTTP, so their "
+        "numbers include the network round-trip and decoding the result into Arrow in "
+        "Python; DuckDB, Polars and pandas are in-process and pay none of that. For Q1, "
+        "which returns one row per trade, that transfer is a large share of the server "
+        "time. QuestDB's Q3 is an as-of-join rewrite: the direct range-join port is "
+        "correct but exceeds QuestDB's 60 s query timeout at this scale (see "
+        "`queries_questdb.py`).\n"
+    )
 
     # --- Layout experiment ---
     lines.append("## Layout experiment — same query, four physical layouts\n")
@@ -139,15 +198,19 @@ def render_markdown(res: BenchResult) -> str:
 
     # --- Scoped query: the honest, counterintuitive layout result ---
     if res.scoped_timings:
+        sc = sorted(res.scoped_timings, key=lambda t: t.median_ms)
+        spread = f"fastest `{sc[0].layout}` {_fmt_ms(sc[0].median_ms)}, slowest " \
+                 f"`{sc[-1].layout}` {_fmt_ms(sc[-1].median_ms)}"
         lines.append("### Scoped query — one symbol, one day\n")
         lines.append(
             "The far more common desk query is \"pull one name for one day\" — an as-of "
             f"join scoped to a single symbol-day (**{res.scoped_meta.get('result_rows','?')}** "
             "result rows). The intuitive expectation is that `by_date_symbol` wins here "
-            "by pruning to one file. It does not, and that is the point: at this scale a "
-            "full scan is cheap, while directory partitioning adds per-file open "
-            "overhead. `by_date_symbol` creates one small file per symbol-day, so it is "
-            "the *slowest* — the small-files anti-pattern. Timed from Parquet, median ms.\n"
+            "by pruning to one file. At this scale it does not: a pruned scan is a few "
+            "milliseconds on every layout, so the layouts land within a few ms of each "
+            f"other ({spread}) and directory partitioning buys nothing measurable. The "
+            "cost of `by_date_symbol` — one small file per symbol-day — only shows up as "
+            "data grows. Timed from Parquet, median ms.\n"
         )
         lines.append("| Query | " + " | ".join(layouts) + " |")
         lines.append("|---|" + "|".join(["--:"] * len(layouts)) + "|")
@@ -160,7 +223,8 @@ def render_markdown(res: BenchResult) -> str:
             "\nThe scale-dependence is the migration lesson — see "
             "`scripts/run_partition_study.py` and `results/partition_study.md`, which "
             "sweep dataset size and show `by_date_symbol` getting *worse* as data grows "
-            "while `sorted` (large files, symbol-clustered, statistics on) stays fast.\n"
+            "(8x as many files as `by_date` at every size) while `sorted` (date "
+            "partitions, symbol-clustered, statistics on) stays fastest.\n"
         )
         lines.append("")
 
@@ -184,18 +248,21 @@ def render_markdown(res: BenchResult) -> str:
             "The compute table above excludes this by design: a research session loads "
             "the working set once and runs many queries against it. Shown so it is not "
             "hidden. Both figures are timed over the *same* work — read Parquet into "
-            "Arrow, then materialize into the engine's own format (native DuckDB tables "
-            "vs pandas DataFrames) — so the two columns are directly comparable and the "
-            "shared Parquet read is charged to both, not to neither.\n"
+            "Arrow, then materialize into the engine's own format — so the columns are "
+            "directly comparable and the shared Parquet read is charged to every engine.\n"
         )
-        lines.append("| Layout | DuckDB load | ClickHouse load | QuestDB load | pandas load |")
-        lines.append("|---|--:|--:|--:|--:|")
+        load_engines = [e for e in ("duckdb", "pandas", "polars", "clickhouse", "questdb")
+                        if any(e in res.load_ms.get(lay, {}) for lay in layouts)]
+        lines.append("| Layout | " + " | ".join(_LOAD_LABELS[e] for e in load_engines) + " |")
+        lines.append("|---|" + "|".join(["--:"] * len(load_engines)) + "|")
         for lay in layouts:
             lm = res.load_ms.get(lay, {})
-            lines.append(
-                f"| {lay} | {_fmt_ms(lm.get('duckdb'))} | {_fmt_ms(lm.get('clickhouse'))} "
-                f"| {_fmt_ms(lm.get('questdb'))} | {_fmt_ms(lm.get('pandas'))} |"
-            )
+            lines.append(f"| {lay} | " + " | ".join(_fmt_ms(lm.get(e)) for e in load_engines) + " |")
+        lines.append(
+            "\nServer loads include ingest over the client protocol and the work to make "
+            "rows queryable (ClickHouse `OPTIMIZE ... FINAL`; QuestDB until the WAL is "
+            "applied).\n"
+        )
         lines.append("")
 
     # --- Provenance ---

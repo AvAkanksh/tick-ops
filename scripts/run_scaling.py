@@ -64,9 +64,9 @@ def main(argv=None) -> int:
 
         src = engine.connect(threads=args.threads)
         engine.register_layout(src, paths)
-        n_trades = src.execute("SELECT count(*) FROM trades").fetchone()[0]
-        n_quotes = src.execute("SELECT count(*) FROM quotes").fetchone()[0]
-        n_book = src.execute("SELECT count(*) FROM book_events").fetchone()[0]
+        n_trades = src.execute("SELECT count(*) FROM trades").fetchall()[0][0]
+        n_quotes = src.execute("SELECT count(*) FROM quotes").fetchall()[0][0]
+        n_book = src.execute("SELECT count(*) FROM book_events").fetchall()[0][0]
         size = sum(dataset_size_bytes(paths, t) for t in ("trades", "quotes", "book_events"))
 
         con = engine.load_native(src, threads=args.threads)

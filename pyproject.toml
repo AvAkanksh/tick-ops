@@ -1,7 +1,7 @@
 [project]
 name = "tickstack"
-version = "0.1.0"
-description = "A modern tick research stack (Arrow/Parquet/DuckDB) benchmarked against a fair pandas baseline on five canonical quant queries"
+version = "0.2.0"
+description = "A tick research stack (Arrow/Parquet/DuckDB) benchmarked against pandas, Polars, ClickHouse and QuestDB on five canonical quant queries, every timing gated by a correctness oracle"
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.1",
@@ -11,7 +11,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+polars = ["polars>=1.20"]
+# Clients for the two server engines (servers themselves: docker compose up -d)
+servers = ["clickhouse-connect>=0.8", "questdb>=3.0"]
+dev = ["pytest>=8.0", "ruff>=0.6", "tickstack[polars,servers]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
